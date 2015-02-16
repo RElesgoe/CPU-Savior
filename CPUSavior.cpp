@@ -24,7 +24,7 @@ freely, subject to the following restrictions:
 #include "stdafx.h"
 
 #define BWLAPI 4
-#define STARCRAFTBUILD 10
+#define STARCRAFTBUILD 11
 
 /*  STARCRAFTBUILD
 	-1   All
@@ -87,7 +87,7 @@ extern "C" __declspec(dllexport) void GetData(char *name, char *description, cha
 {
 	//if necessary you can add Initialize function here
 	//possibly check CurrentCulture (CultureInfo) to localize your DLL due to system settings
-	strcpy(name,      "CPU Savior (1.15.2)");
+	strcpy(name,      "CPU Savior (1.15.3)");
 	strcpy(description, "Reduces CPU usage.");
 	strcpy(updateurl,   "");
 }
@@ -168,18 +168,48 @@ extern "C" __declspec(naked) void tickCountStub (void)
 {
 	__asm
 	{
+		__emit 0xE8	//call GetTickCount
+		__emit 0xCC
+		__emit 0xCC
+		__emit 0xCC
+		__emit 0xCC
+
+		//cmp dword ptr [esp], 004D94B9h //1.15.2
+		cmp dword ptr [esp], 004D9519h
+		je doSleep
+		//cmp dword ptr [esp], 004D18CFh //1.15.2
+		cmp dword ptr [esp], 004D191Fh
+		jne noSleep
+
+		/*__emit 0x3B	//cmp eax, [addr]
+		__emit 0x05
+		__emit 0xCC
+		__emit 0xCC
+		__emit 0xCC
+		__emit 0xCC
+
+		jne noSleep*/
+doSleep:
+		push eax
 		push 1
-		__emit 0xFF
+
+		__emit 0xFF	//call IAT:Sleep
 		__emit 0x15
-		__emit 0x0C
+
+		__emit 0x0C	//IAT for Sleep 1.15.x
 		__emit 0xE1
 		__emit 0x4F
 		__emit 0x00
-		__emit 0xE9
+		pop eax
+noSleep:
+
+		/*__emit 0xA3	//mov [addr], eax
 		__emit 0xCC
 		__emit 0xCC
 		__emit 0xCC
-		__emit 0xCC
+		__emit 0xCC*/
+
+		retn
 	}
 }
 
@@ -188,40 +218,196 @@ extern "C" __declspec (naked) void tickCountStubEnd (void)
 	__asm int 3;
 }
 
+extern "C" __declspec(naked) void getPropStub (void)
+{
+	__asm
+	{
+		//for safety, we only sleep if we were called from storm.dll address
+		//cmp dword ptr [esp], 15013E55h
+		cmp dword ptr [esp], 150135C5h
+		jne SkipSleep
+		push 1
+		__emit 0xFF
+		__emit 0x15
+		__emit 0x0C
+		__emit 0xE1
+		__emit 0x4F
+		__emit 0x00
+SkipSleep:
+		__emit 0xE9
+		__emit 0xCC
+		__emit 0xCC
+		__emit 0xCC
+		__emit 0xCC
+	}
+}
+
+extern "C" __declspec (naked) void getPropStubEnd (void)
+{
+	__asm int 4;
+}
+
+/*
+15013E48  |> E8 43C4FFFF    /call storm.15010290
+15013E4D  |. 68 6C2C0515    |push storm.15052C6C                     ;  ASCII "SDlg_EndDialog"
+15013E52  |. 56             |push esi
+15013E53  |. FFD3           |call ebx
+15013E55  |. 85C0           |test eax,eax
+15013E57  |.^74 EF          \je short storm.15013E48
+*/
+
+extern "C" __declspec(naked) void LoadDLLstub (void)
+{
+	__asm
+	{
+		push 0xCCCCCCCC		//addr of WINMM
+		_emit 0xE8			//call LoadLibraryW
+		_emit 0xcc
+		_emit 0xcc
+		_emit 0xcc
+		_emit 0xcc
+		test eax, eax		//check DLL loaded
+		jz noProc			//if not, abort
+		push 0xCCCCCCCC		//addr of timeBeginPeriod
+		push eax			//handle to WINMM
+		_emit 0xE8			//call GetProcAddress
+		_emit 0xcc
+		_emit 0xcc
+		_emit 0xcc
+		_emit 0xcc
+		test eax, eax		//check we got proc
+		jz noProc			//if not, abort
+		push 1
+		call eax			//call timeBeginPeriod(1)
+noProc:
+		retn 4				//return (and exit) thread
+	}
+}
+
+extern "C" __declspec (naked) void LoadDLLstubEnd (void)
+{
+	__asm int 5;
+}
+
 DWORD WINAPI DelayedPatch (VOID *arg)
 {
 	BYTE	*buff;
 	DWORD	ret;
-	DWORD	getTickAddr, scAddr;
+	DWORD	getTickAddr, scAddr, getPropAddr;
 	HANDLE	hProcess;
 
+	//for some reason, the loading screen calls GetTickCount insanely often and injecting early
+	//just causes it to take 20+ seconds to load. hopefully 5 seconds is enough to get to the main menu
 	Sleep (5000);
 
 	hProcess = (HANDLE)arg;
+	if (!hProcess)
+		return 1;
 
+	//get address of functions we want to patch
 	getTickAddr = (DWORD)GetTickCount;
+	getPropAddr = (DWORD)GetPropA;
 
+	//read current IAT entry for GetTickCount 1.15.x
 	ReadProcessMemory (hProcess, (LPVOID)0x004FE0C4, &scAddr, 4, &ret);
 	if (ret != 4)
 		return 1;
 
 	buff = (BYTE *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	if (!buff)
+		return 1;
 	
-	VirtualProtect ((LPVOID)tickCountStub, (DWORD)tickCountStubEnd - (DWORD)tickCountStub, PAGE_READWRITE, &ret);
+	//modify our patch stub
+	VirtualProtect ((LPVOID)tickCountStub, (DWORD)tickCountStubEnd - (DWORD)tickCountStub, PAGE_EXECUTE_READWRITE, &ret);
 
-	//*(DWORD *)((BYTE *)tickCountStub + 4) = (long)Sleep - ((long)buff + 4 + 5);
-	*(DWORD *)((BYTE *)tickCountStub + 9) = (long)scAddr - ((long)buff + 9 + 5);
+	*(DWORD *)((BYTE *)tickCountStub + 1) = (long)scAddr - ((long)buff + 1 + 5);
 
+	//*(DWORD *)((BYTE *)tickCountStub + 7) = ((long)buff + 64);
+	//*(DWORD *)((BYTE *)tickCountStub + 24) = ((long)buff + 64);
+
+	//write it in
 	WriteProcessMemory (hProcess, buff, tickCountStub, (DWORD)tickCountStubEnd - (DWORD)tickCountStub, &ret);
 	if (ret != (DWORD)tickCountStubEnd - (DWORD)tickCountStub)
 		return 1;
 
+	//patch IAT 1.15.x
 	DWORD addr = (DWORD)buff;
 	VirtualProtectEx (hProcess, (LPVOID)0x004FE0C4, 4, PAGE_READWRITE, &ret);
 	WriteProcessMemory (hProcess, (LPVOID)0x004FE0C4, &addr, 4, &ret);
 	if (ret != 4)
 		return 1;
 
+	//same as before, but for GetProp
+	ReadProcessMemory (hProcess, (LPVOID)0x150452A4, &scAddr, 4, &ret);
+	if (ret != 4)
+		return 1;
+
+	buff = (BYTE *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	if (!buff)
+		return 1;
+	
+	VirtualProtect ((LPVOID)getPropStub, (DWORD)getPropStubEnd - (DWORD)getPropStub, PAGE_EXECUTE_READWRITE, &ret);
+
+	*(DWORD *)((BYTE *)getPropStub + 18) = (long)scAddr - ((long)buff + 18 + 5);
+
+	WriteProcessMemory (hProcess, buff, getPropStub, (DWORD)getPropStubEnd - (DWORD)getPropStub, &ret);
+	if (ret != (DWORD)getPropStubEnd - (DWORD)getPropStub)
+		return 1;
+
+	addr = (DWORD)buff;
+	VirtualProtectEx (hProcess, (LPVOID)0x150452A4, 4, PAGE_READWRITE, &ret);
+	WriteProcessMemory (hProcess, (LPVOID)0x150452A4, &addr, 4, &ret);
+	if (ret != 4)
+		return 1;
+
+	//here we inject a code stub to load WINMM and call timeBeginPeriod (1) to increase Sleep resolution
+	_TCHAR	*pInit = (_TCHAR *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_READWRITE);
+	_TCHAR	*pDLL = (_TCHAR *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_READWRITE);
+	BYTE	*pCode = (BYTE *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+	if (!pInit)
+		return 1;
+
+	if (!pDLL)
+		return 1;
+
+	if (!pCode)
+		return 1;
+
+	//function name
+	WriteProcessMemory (hProcess, pInit, "timeBeginPeriod", 16, &ret);
+	if (ret != 16)
+		return 1;
+
+	//dll name
+	_TCHAR	*ptWinMM = _T("WINMM");
+	WriteProcessMemory (hProcess, pDLL, ptWinMM, 12, &ret);
+	if (ret != 12)
+		return 1;
+
+	//fix up our image patch
+	VirtualProtect ((LPVOID)LoadDLLstub, (DWORD)LoadDLLstubEnd - (DWORD)LoadDLLstub, PAGE_EXECUTE_READWRITE, &ret);
+
+	*(DWORD *)((BYTE *)LoadDLLstub + 1) = (DWORD)pDLL;
+	*(DWORD *)((BYTE *)LoadDLLstub + 6) = (long)LoadLibraryW - ((long)pCode + 5 + 5);
+
+	*(DWORD *)((BYTE *)LoadDLLstub + 15) = (DWORD)pInit;
+	*(DWORD *)((BYTE *)LoadDLLstub + 21) = (long)GetProcAddress - ((long)pCode + 20 + 5);
+
+	//write the patch
+	WriteProcessMemory (hProcess, pCode, LoadDLLstub, (DWORD)LoadDLLstubEnd - (DWORD)LoadDLLstub, &ret);
+	if (ret != (DWORD)LoadDLLstubEnd - (DWORD)LoadDLLstub)
+		return false;
+
+	//run it
+	HANDLE hThread;
+	hThread = CreateRemoteThread (hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pCode, NULL, 0, NULL);
+	if (!hThread || hThread == INVALID_HANDLE_VALUE)
+		return FALSE;
+
+	ResumeThread (hThread);
+
+	//good practice :)
 	FlushInstructionCache (hProcess, NULL, 0);
 
 	return 0;
