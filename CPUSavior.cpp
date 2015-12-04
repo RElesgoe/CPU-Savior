@@ -21,7 +21,9 @@ freely, subject to the following restrictions:
     distribution.
 */
 
-#include "stdafx.h"
+#include <cstring>
+
+#include <Windows.h>
 
 #define BWLAPI 4
 #define STARCRAFTBUILD 11
@@ -87,9 +89,9 @@ extern "C" __declspec(dllexport) void GetData(char *name, char *description, cha
 {
 	//if necessary you can add Initialize function here
 	//possibly check CurrentCulture (CultureInfo) to localize your DLL due to system settings
-	strcpy(name,      "CPU Savior (1.15.3)");
-	strcpy(description, "Reduces CPU usage.");
-	strcpy(updateurl,   "");
+	std::strcpy(name,      "CPU Savior (1.15.3)");
+	std::strcpy(description, "Reduces CPU usage.");
+	std::strcpy(updateurl,   "");
 }
 
 
@@ -361,8 +363,8 @@ DWORD WINAPI DelayedPatch (VOID *arg)
 		return 1;
 
 	//here we inject a code stub to load WINMM and call timeBeginPeriod (1) to increase Sleep resolution
-	_TCHAR	*pInit = (_TCHAR *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_READWRITE);
-	_TCHAR	*pDLL = (_TCHAR *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_READWRITE);
+	char	*pInit = (char *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_READWRITE);
+	char	*pDLL = (char *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_READWRITE);
 	BYTE	*pCode = (BYTE *)VirtualAllocEx (hProcess, NULL, 256, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 
 	if (!pInit)
@@ -380,7 +382,7 @@ DWORD WINAPI DelayedPatch (VOID *arg)
 		return 1;
 
 	//dll name
-	_TCHAR	*ptWinMM = _T("WINMM");
+	char	*ptWinMM = "WINMM";
 	WriteProcessMemory (hProcess, pDLL, ptWinMM, 12, &ret);
 	if (ret != 12)
 		return 1;
